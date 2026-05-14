@@ -1,0 +1,6 @@
+---
+alwaysApply: true
+---
+В папке settings-manager создается REST-сервис для управления настройками системы Joposcragent.
+Сервис должен быть реализован на Koltin с использованием Spring Boot, PostgreSQL, jOOQ, Actuator, Logback, SLF4J.
+Для генерации кода jOOQ создай task в build.gradle.kts, который будет подключаться к jdbc:postgresql://localhost:5432/joposcragent и генерировать код из схемы `settings`.

@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.stereotype.Component
 import ru.sadovskie.leo.app.joposcragent.asyncjobscrud.service.AsyncJobKafkaIngestService
+import tools.jackson.databind.JsonNode
 import tools.jackson.databind.json.JsonMapper
 
 @Component
@@ -34,8 +35,8 @@ class AsyncJobBeginKafkaListener(
 			log.warn("begin: invalid json: {}", it.message)
 			return
 		}
-		val payload = root.get("payload") ?: run {
-			log.warn("begin: missing payload for type={}", type)
+		val payload = root.kafkaMessagePayloadOrNull() ?: run {
+			log.warn("begin: missing or invalid body for type={}", type)
 			return
 		}
 		ingestService.handleBegin(type, payload)
@@ -74,8 +75,8 @@ class AsyncJobResultKafkaListener(
 			log.warn("result: invalid json: {}", it.message)
 			return
 		}
-		val payload = root.get("payload") ?: run {
-			log.warn("result: missing payload for type={}", type)
+		val payload = root.kafkaMessagePayloadOrNull() ?: run {
+			log.warn("result: missing or invalid body for type={}", type)
 			return
 		}
 		ingestService.handleResult(payload)
@@ -85,4 +86,14 @@ class AsyncJobResultKafkaListener(
 		runCatching {
 			objectMapper.readTree(json).path("headers").path("type").asText(null)
 		}.getOrNull()
+}
+
+private fun JsonNode.kafkaMessagePayloadOrNull(): JsonNode? {
+	val headers = get("headers")
+	val payload = get("payload")
+	return when {
+		headers != null && headers.isObject && payload != null && payload.isObject -> payload
+		isObject -> this
+		else -> null
+	}
 }

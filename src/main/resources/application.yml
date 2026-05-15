@@ -7,6 +7,7 @@ management:
         include: "*"
 
 app:
+  autoresolve-parent-tasks: false
   kafka:
     begin-consumer-group: orchestration-async-jobs-begin
     result-consumer-group: orchestration-async-jobs-result

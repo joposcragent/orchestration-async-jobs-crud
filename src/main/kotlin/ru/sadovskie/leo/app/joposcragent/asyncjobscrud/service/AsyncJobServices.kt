@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import ru.sadovskie.leo.app.joposcragent.asyncjobscrud.jooq.enums.AsyncJobStatus as JooqStatus
 import ru.sadovskie.leo.app.joposcragent.asyncjobscrud.jooq.tables.records.AsyncJobsRecord
+import ru.sadovskie.leo.app.joposcragent.asyncjobscrud.config.AppProperties
 import ru.sadovskie.leo.app.joposcragent.asyncjobscrud.openapi.model.AsyncJobHierarchy
 import ru.sadovskie.leo.app.joposcragent.asyncjobscrud.openapi.model.AsyncJobHierarchyRelatedList
 import ru.sadovskie.leo.app.joposcragent.asyncjobscrud.openapi.model.AsyncJobItem
@@ -22,6 +23,7 @@ import java.util.UUID
 class AsyncJobKafkaIngestService(
 	private val repository: AsyncJobRepository,
 	private val jsonMapper: JsonMapper,
+	private val appProperties: AppProperties,
 ) {
 	private val log = LoggerFactory.getLogger(javaClass)
 
@@ -122,6 +124,9 @@ class AsyncJobKafkaIngestService(
 	}
 
 	private fun maybeCompleteParent(parentUuid: UUID?, finishedChildUuid: UUID) {
+		if (!appProperties.autoresolveParentTasks) {
+			return
+		}
 		if (parentUuid == null) {
 			return
 		}
@@ -148,6 +153,7 @@ class AsyncJobRestService(
 	private val repository: AsyncJobRepository,
 	private val mapper: AsyncJobMapper,
 	private val jsonMapper: JsonMapper,
+	private val appProperties: AppProperties,
 ) {
 	private val log = LoggerFactory.getLogger(javaClass)
 
@@ -246,6 +252,9 @@ class AsyncJobRestService(
 	}
 
 	private fun maybeCompleteParent(parentUuid: UUID?, finishedChildUuid: UUID) {
+		if (!appProperties.autoresolveParentTasks) {
+			return
+		}
 		if (parentUuid == null) {
 			return
 		}

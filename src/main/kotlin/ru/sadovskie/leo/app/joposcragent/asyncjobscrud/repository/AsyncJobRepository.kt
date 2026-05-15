@@ -238,32 +238,58 @@ class AsyncJobRepository(
 	}
 
 	fun fetchDescendantsPage(parentUuid: UUID, size: Int?, page: Int?): List<AsyncJobsRecord> {
-		val baseSql = """
-			WITH RECURSIVE d AS (
-				SELECT * FROM orchestration.async_jobs WHERE parent_uuid = CAST(? AS uuid)
-				UNION ALL
-				SELECT aj.* FROM orchestration.async_jobs aj INNER JOIN d ON aj.parent_uuid = d.uuid
+		val cteName = DSL.name("d")
+		val anc = AsyncJobs.ASYNC_JOBS.`as`("anc")
+		val aj = AsyncJobs.ASYNC_JOBS.`as`("aj")
+		val anchor = dsl.select(anc.asterisk())
+			.from(anc)
+			.where(anc.PARENT_UUID.eq(parentUuid))
+		val uuidFromCte = DSL.field(
+			DSL.name("d", AsyncJobs.ASYNC_JOBS.UUID.name),
+			AsyncJobs.ASYNC_JOBS.UUID.dataType,
+		)
+		val recursive = dsl.select(aj.asterisk())
+			.from(aj)
+			.innerJoin(DSL.table(cteName))
+			.on(aj.PARENT_UUID.eq(uuidFromCte))
+		val cte = cteName.`as`(anchor.unionAll(recursive))
+		val ordered = dsl.withRecursive(cte)
+			.selectFrom(cte)
+			.orderBy(
+				cte.field(AsyncJobs.ASYNC_JOBS.STARTED_AT)!!.asc().nullsLast(),
+				cte.field(AsyncJobs.ASYNC_JOBS.UUID)!!.asc(),
 			)
-			SELECT * FROM d ORDER BY started_at ASC NULLS LAST, uuid ASC
-		""".trimIndent()
 		return if (size != null && page != null) {
 			val offset = (page - 1) * size
-			dsl.fetch("$baseSql LIMIT ? OFFSET ?", parentUuid, size, offset).into(AsyncJobs.ASYNC_JOBS)
+			ordered.limit(size).offset(offset).fetchInto(AsyncJobs.ASYNC_JOBS)
 		} else {
-			dsl.fetch(baseSql, parentUuid).into(AsyncJobs.ASYNC_JOBS)
+			ordered.fetchInto(AsyncJobs.ASYNC_JOBS)
 		}
 	}
 
 	fun fetchSubtreeIncludingRoot(rootUuid: UUID): List<AsyncJobsRecord> {
-		val sql = """
-			WITH RECURSIVE t AS (
-				SELECT * FROM orchestration.async_jobs WHERE uuid = CAST(? AS uuid)
-				UNION ALL
-				SELECT aj.* FROM orchestration.async_jobs aj INNER JOIN t ON aj.parent_uuid = t.uuid
+		val cteName = DSL.name("t")
+		val anc = AsyncJobs.ASYNC_JOBS.`as`("anc")
+		val aj = AsyncJobs.ASYNC_JOBS.`as`("aj")
+		val anchor = dsl.select(anc.asterisk())
+			.from(anc)
+			.where(anc.UUID.eq(rootUuid))
+		val uuidFromCte = DSL.field(
+			DSL.name("t", AsyncJobs.ASYNC_JOBS.UUID.name),
+			AsyncJobs.ASYNC_JOBS.UUID.dataType,
+		)
+		val recursive = dsl.select(aj.asterisk())
+			.from(aj)
+			.innerJoin(DSL.table(cteName))
+			.on(aj.PARENT_UUID.eq(uuidFromCte))
+		val cte = cteName.`as`(anchor.unionAll(recursive))
+		return dsl.withRecursive(cte)
+			.selectFrom(cte)
+			.orderBy(
+				cte.field(AsyncJobs.ASYNC_JOBS.STARTED_AT)!!.asc().nullsLast(),
+				cte.field(AsyncJobs.ASYNC_JOBS.UUID)!!.asc(),
 			)
-			SELECT * FROM t ORDER BY started_at ASC NULLS LAST, uuid ASC
-		""".trimIndent()
-		return dsl.fetch(sql, rootUuid).into(AsyncJobs.ASYNC_JOBS)
+			.fetchInto(AsyncJobs.ASYNC_JOBS)
 	}
 
 	fun relatedRootUuidsPaged(entityUuid: UUID, size: Int, page: Int): List<UUID> {

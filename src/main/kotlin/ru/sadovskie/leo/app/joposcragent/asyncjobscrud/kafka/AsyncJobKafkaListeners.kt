@@ -1,6 +1,7 @@
 package ru.sadovskie.leo.app.joposcragent.asyncjobscrud.kafka
 
 import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.stereotype.Component
@@ -25,10 +26,24 @@ class AsyncJobBeginKafkaListener(
 		groupId = "\${app.kafka.begin-consumer-group}",
 	)
 	fun onMessage(record: ConsumerRecord<String, String>) {
+		log.debugKafkaInbound(record)
 		val type = record.headers().lastHeader("type")?.value()?.toString(Charsets.UTF_8)
 			?: record.value()?.let { parseTypeFromJson(it) }
-			?: return
+			?: run {
+				if (log.isDebugEnabled) {
+					log.debug("Kafka begin: no type in headers or json, key={}", record.key())
+				}
+				return
+			}
 		if (type !in AsyncJobBeginTypes.ALL) {
+			if (log.isDebugEnabled) {
+				log.debug(
+					"Kafka begin: ignored type={} topic={} key={}",
+					type,
+					record.topic(),
+					record.key(),
+				)
+			}
 			return
 		}
 		val root = runCatching { objectMapper.readTree(record.value()) }.getOrElse {
@@ -39,6 +54,12 @@ class AsyncJobBeginKafkaListener(
 			log.warn("begin: missing or invalid body for type={}", type)
 			return
 		}
+		log.info(
+			"Kafka begin: dispatching type={} topic={} key={}",
+			type,
+			record.topic(),
+			record.key(),
+		)
 		ingestService.handleBegin(type, payload)
 	}
 
@@ -65,10 +86,24 @@ class AsyncJobResultKafkaListener(
 		groupId = "\${app.kafka.result-consumer-group}",
 	)
 	fun onMessage(record: ConsumerRecord<String, String>) {
+		log.debugKafkaInbound(record)
 		val type = record.headers().lastHeader("type")?.value()?.toString(Charsets.UTF_8)
 			?: record.value()?.let { parseTypeFromJson(it) }
-			?: return
+			?: run {
+				if (log.isDebugEnabled) {
+					log.debug("Kafka result: no type in headers or json, key={}", record.key())
+				}
+				return
+			}
 		if (type !in AsyncJobResultTypes.ALL) {
+			if (log.isDebugEnabled) {
+				log.debug(
+					"Kafka result: ignored type={} topic={} key={}",
+					type,
+					record.topic(),
+					record.key(),
+				)
+			}
 			return
 		}
 		val root = runCatching { objectMapper.readTree(record.value()) }.getOrElse {
@@ -79,6 +114,12 @@ class AsyncJobResultKafkaListener(
 			log.warn("result: missing or invalid body for type={}", type)
 			return
 		}
+		log.info(
+			"Kafka result: dispatching type={} topic={} key={}",
+			type,
+			record.topic(),
+			record.key(),
+		)
 		ingestService.handleResult(payload)
 	}
 
@@ -86,6 +127,24 @@ class AsyncJobResultKafkaListener(
 		runCatching {
 			objectMapper.readTree(json).path("headers").path("type").asText(null)
 		}.getOrNull()
+}
+
+private fun Logger.debugKafkaInbound(record: ConsumerRecord<String, String>) {
+	if (!isDebugEnabled) {
+		return
+	}
+	val headersJoined = record.headers().joinToString(prefix = "[", postfix = "]") { h ->
+		"${h.key()}=${h.value().toString(Charsets.UTF_8)}"
+	}
+	debug(
+		"Kafka inbound topic={} partition={} offset={} key={} headers={} value={}",
+		record.topic(),
+		record.partition(),
+		record.offset(),
+		record.key(),
+		headersJoined,
+		record.value(),
+	)
 }
 
 private fun JsonNode.kafkaMessagePayloadOrNull(): JsonNode? {

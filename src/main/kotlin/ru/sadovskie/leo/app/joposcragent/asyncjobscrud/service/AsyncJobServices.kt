@@ -21,12 +21,21 @@ import java.util.UUID
 @Service
 class AsyncJobKafkaIngestService(
 	private val repository: AsyncJobRepository,
+	private val jsonMapper: JsonMapper,
 ) {
 	private val log = LoggerFactory.getLogger(javaClass)
 
 	@Transactional
 	fun handleBegin(type: String, payload: JsonNode) {
-		val jobUuid = payload.uuid("jobUuid") ?: return
+		if (log.isDebugEnabled) {
+			log.debug("Kafka begin ingest: type={} payload={}", type, jsonMapper.writeValueAsString(payload))
+		}
+		val jobUuid = payload.uuid("jobUuid") ?: run {
+			if (log.isDebugEnabled) {
+				log.debug("Kafka begin: missing jobUuid, skipping")
+			}
+			return
+		}
 		val parentUuid = payload.uuid("parentJobUuid")
 		val contextNode = payload.get("context")
 		val ctx = repository.contextJsonFromNode(contextNode)
@@ -40,24 +49,62 @@ class AsyncJobKafkaIngestService(
 			log.warn("Kafka begin: job {} already exists, skipping", jobUuid)
 			return
 		}
+		log.info("Kafka begin: inserted job jobUuid={} name={} parentUuid={}", jobUuid, type, parentUuid)
 		val entityUuid = payload.get("entityUuid")?.takeIf { !it.isNull && it.asText().isNotBlank() }
 			?.let { UUID.fromString(it.asText()) }
-			?: return
+			?: run {
+				if (log.isDebugEnabled) {
+					log.debug(
+						"Kafka begin: missing entityUuid after insert jobUuid={} payload={}",
+						jobUuid,
+						jsonMapper.writeValueAsString(payload),
+					)
+				}
+				return
+			}
 		when (type) {
-			"async-job.collection-query-begin" ->
+			"async-job.collection-query-begin" -> {
 				repository.insertQueryRelation(jobUuid, entityUuid)
-			"async-job.job-posting-evaluate-begin", "async-job.job-posting-create-begin" ->
+				log.info("Kafka begin: linked QUERY jobUuid={} entityUuid={}", jobUuid, entityUuid)
+			}
+			"async-job.job-posting-evaluate-begin", "async-job.job-posting-create-begin" -> {
 				repository.insertPostingRelation(jobUuid, entityUuid)
+				log.info("Kafka begin: linked POSTING jobUuid={} entityUuid={}", jobUuid, entityUuid)
+			}
+			else -> {
+				log.info("Kafka begin: no entity relation for begin type={} jobUuid={}", type, jobUuid)
+			}
 		}
 	}
 
 	@Transactional
 	fun handleResult(payload: JsonNode) {
-		val jobUuid = payload.uuid("jobUuid") ?: return
-		val statusStr = payload.path("status").asText(null) ?: return
+		if (log.isDebugEnabled) {
+			log.debug("Kafka result ingest: payload={}", jsonMapper.writeValueAsString(payload))
+		}
+		val jobUuid = payload.uuid("jobUuid") ?: run {
+			if (log.isDebugEnabled) {
+				log.debug("Kafka result: missing jobUuid, skipping")
+			}
+			return
+		}
+		val statusStr = payload.path("status").asText(null) ?: run {
+			if (log.isDebugEnabled) {
+				log.debug("Kafka result: missing status jobUuid={}, skipping", jobUuid)
+			}
+			return
+		}
 		val terminal = runCatching { JooqStatus.valueOf(statusStr) }.getOrNull()
-			?: return
+			?: run {
+				if (log.isDebugEnabled) {
+					log.debug("Kafka result: unknown status={} jobUuid={}, skipping", statusStr, jobUuid)
+				}
+				return
+			}
 		if (terminal == JooqStatus.STARTED) {
+			if (log.isDebugEnabled) {
+				log.debug("Kafka result: non-terminal status STARTED jobUuid={}, ignoring", jobUuid)
+			}
 			return
 		}
 		val row = repository.findByUuid(jobUuid) ?: run {
@@ -70,6 +117,7 @@ class AsyncJobKafkaIngestService(
 		}
 		val resultJson = repository.resultJsonbFromNode(payload.get("result"))
 		repository.finishJob(jobUuid, terminal, resultJson, updateResult = true)
+		log.info("Kafka result: finished job jobUuid={} status={}", jobUuid, terminal)
 		maybeCompleteParent(row.parentUuid, jobUuid)
 	}
 
@@ -82,6 +130,11 @@ class AsyncJobKafkaIngestService(
 			return
 		}
 		if (repository.countStartedSiblings(parentUuid, finishedChildUuid) == 0) {
+			log.info(
+				"Kafka result: all children done, completing parent parentUuid={} lastChildUuid={}",
+				parentUuid,
+				finishedChildUuid,
+			)
 			repository.finishParentIfStarted(parentUuid)
 		}
 	}
@@ -94,9 +147,14 @@ class AsyncJobKafkaIngestService(
 class AsyncJobRestService(
 	private val repository: AsyncJobRepository,
 	private val mapper: AsyncJobMapper,
+	private val jsonMapper: JsonMapper,
 ) {
+	private val log = LoggerFactory.getLogger(javaClass)
 
 	fun create(jobUuid: UUID, body: CreateAsyncJobItem) {
+		if (log.isDebugEnabled) {
+			log.debug("REST create jobUuid={} body={}", jobUuid, jsonMapper.writeValueAsString(body))
+		}
 		require(body.uuid == jobUuid) { "uuid mismatch" }
 		if (repository.exists(jobUuid)) {
 			throw ConflictException()
@@ -108,10 +166,14 @@ class AsyncJobRestService(
 			status = JooqStatus.STARTED,
 			contextJson = repository.contextJsonFromMap(body.context),
 		)
+		log.info("REST create: inserted job jobUuid={} name={}", jobUuid, body.name)
 	}
 
 	@Transactional
 	fun patch(jobUuid: UUID, patch: JsonNode) {
+		if (log.isDebugEnabled) {
+			log.debug("REST patch jobUuid={} patch={}", jobUuid, jsonMapper.writeValueAsString(patch))
+		}
 		val hasAny = patch.properties().any()
 		if (!hasAny) {
 			throw BadRequestException("empty patch")
@@ -165,16 +227,21 @@ class AsyncJobRestService(
 			clearContext = clearContext,
 			finishedAt = finishedAt,
 		)
+		log.info("REST patch: updated job jobUuid={}", jobUuid)
 	}
 
 	@Transactional
 	fun finish(jobUuid: UUID, terminal: AsyncJobTerminalStatus) {
+		if (log.isDebugEnabled) {
+			log.debug("REST finish jobUuid={} terminal={}", jobUuid, terminal)
+		}
 		val row = repository.findByUuid(jobUuid) ?: throw NotFoundException()
 		if (row.status != JooqStatus.STARTED) {
 			throw ConflictException()
 		}
 		val st = JooqStatus.valueOf(terminal.value)
 		repository.finishJob(jobUuid, st, null, updateResult = false)
+		log.info("REST finish: job jobUuid={} terminal={}", jobUuid, terminal)
 		maybeCompleteParent(row.parentUuid, jobUuid)
 	}
 
@@ -187,16 +254,28 @@ class AsyncJobRestService(
 			return
 		}
 		if (repository.countStartedSiblings(parentUuid, finishedChildUuid) == 0) {
+			log.info(
+				"REST finish: all children done, completing parent parentUuid={} lastChildUuid={}",
+				parentUuid,
+				finishedChildUuid,
+			)
 			repository.finishParentIfStarted(parentUuid)
 		}
 	}
 
 	fun get(jobUuid: UUID): AsyncJobItem {
 		val row = repository.findByUuid(jobUuid) ?: throw NotFoundException()
-		return mapper.toApi(row)
+		val item = mapper.toApi(row)
+		if (log.isDebugEnabled) {
+			log.debug("REST get jobUuid={} response={}", jobUuid, jsonMapper.writeValueAsString(item))
+		}
+		return item
 	}
 
 	fun addRelated(jobUuid: UUID, entityKind: String, entityUuid: UUID) {
+		if (log.isDebugEnabled) {
+			log.debug("REST addRelated jobUuid={} entityKind={} entityUuid={}", jobUuid, entityKind, entityUuid)
+		}
 		if (entityKind != "POSTING" && entityKind != "QUERY") {
 			throw BadRequestException("entityKind")
 		}
@@ -211,6 +290,7 @@ class AsyncJobRestService(
 		if (!ok) {
 			throw ConflictException()
 		}
+		log.info("REST addRelated: jobUuid={} entityKind={} entityUuid={}", jobUuid, entityKind, entityUuid)
 	}
 
 	fun list(
@@ -224,7 +304,19 @@ class AsyncJobRestService(
 		val pg = normalizePage(page)
 		val st = status?.let { JooqStatus.valueOf(it.value) }
 		val rows = repository.listJobs(parentJobUuid, st, startedBefore, sz, pg)
-		return AsyncJobList(list = rows.map { mapper.toApi(it) })
+		val list = AsyncJobList(list = rows.map { mapper.toApi(it) })
+		log.info(
+			"REST list: returned {} job(s) parentJobUuid={} status={} size={} page={}",
+			list.list.size,
+			parentJobUuid,
+			status,
+			sz,
+			pg,
+		)
+		if (log.isDebugEnabled) {
+			log.debug("REST list: response={}", jsonMapper.writeValueAsString(list))
+		}
+		return list
 	}
 
 	fun listRelated(
@@ -238,13 +330,34 @@ class AsyncJobRestService(
 		val pg = normalizePage(page)
 		val st = status?.let { JooqStatus.valueOf(it.value) }
 		val rows = repository.listJobsRelatedToEntity(entityUuid, st, startedBefore, sz, pg)
-		return AsyncJobList(list = rows.map { mapper.toApi(it) })
+		val list = AsyncJobList(list = rows.map { mapper.toApi(it) })
+		log.info(
+			"REST listRelated: returned {} job(s) entityUuid={} status={} size={} page={}",
+			list.list.size,
+			entityUuid,
+			status,
+			sz,
+			pg,
+		)
+		if (log.isDebugEnabled) {
+			log.debug("REST listRelated: response={}", jsonMapper.writeValueAsString(list))
+		}
+		return list
 	}
 
 	fun hierarchy(parentJobUuid: UUID, size: Int?, page: Int?): AsyncJobHierarchy {
 		val rootRow = repository.findByUuid(parentJobUuid) ?: throw NotFoundException()
 		val descendants = repository.fetchDescendantsPage(parentJobUuid, size, page)
-		return mapper.toHierarchy(rootRow, descendants)
+		val tree = mapper.toHierarchy(rootRow, descendants)
+		log.info(
+			"REST hierarchy: parentJobUuid={} descendantCount={}",
+			parentJobUuid,
+			descendants.size,
+		)
+		if (log.isDebugEnabled) {
+			log.debug("REST hierarchy: response={}", jsonMapper.writeValueAsString(tree))
+		}
+		return tree
 	}
 
 	fun hierarchyRelated(entityUuid: UUID, size: Int?, page: Int?): AsyncJobHierarchyRelatedList {
@@ -252,6 +365,7 @@ class AsyncJobRestService(
 		val pg = normalizePage(page)
 		val roots = repository.relatedRootUuidsPaged(entityUuid, sz, pg)
 		if (roots.isEmpty()) {
+			log.info("REST hierarchyRelated: no roots entityUuid={}", entityUuid)
 			return AsyncJobHierarchyRelatedList(list = emptyList())
 		}
 		val list = roots.map { rootUuid ->
@@ -260,7 +374,16 @@ class AsyncJobRestService(
 			val descendants = subtree.filter { it.uuid != rootUuid }
 			mapper.toHierarchy(rootRow, descendants)
 		}
-		return AsyncJobHierarchyRelatedList(list = list)
+		val out = AsyncJobHierarchyRelatedList(list = list)
+		log.info(
+			"REST hierarchyRelated: entityUuid={} rootCount={}",
+			entityUuid,
+			list.size,
+		)
+		if (log.isDebugEnabled) {
+			log.debug("REST hierarchyRelated: response={}", jsonMapper.writeValueAsString(out))
+		}
+		return out
 	}
 
 	private fun normalizeSize(size: Int?): Int = (size ?: 20).coerceAtLeast(1)

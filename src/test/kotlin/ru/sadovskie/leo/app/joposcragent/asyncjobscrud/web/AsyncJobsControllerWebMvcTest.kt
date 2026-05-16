@@ -64,4 +64,14 @@ class AsyncJobsControllerWebMvcTest {
 		).andExpect(status().isOk)
 		verify(exactly = 1) { service.create(id, any()) }
 	}
+
+	@Test
+	fun `finish invalid json returns 400`() {
+		val id = UUID.randomUUID()
+		mockMvc.perform(
+			post("/async-jobs/$id/finish/SUCCEEDED")
+				.contentType(MediaType.APPLICATION_JSON)
+				.content("{not-json"),
+		).andExpect(status().isBadRequest)
+	}
 }

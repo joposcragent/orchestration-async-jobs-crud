@@ -116,7 +116,15 @@ class AsyncJobRepository(
 		step.where(AsyncJobs.ASYNC_JOBS.UUID.eq(uuid)).execute()
 	}
 
-	fun finishJob(uuid: UUID, status: AsyncJobStatus, resultJsonb: JSONB?, updateResult: Boolean) {
+	fun finishJob(
+		uuid: UUID,
+		status: AsyncJobStatus,
+		resultJsonb: JSONB? = null,
+		updateResult: Boolean = false,
+		contextJson: JSON? = null,
+		clearContext: Boolean = false,
+		updateContext: Boolean = false,
+	) {
 		val now = OffsetDateTime.now()
 		var step = dsl.update(AsyncJobs.ASYNC_JOBS)
 			.set(AsyncJobs.ASYNC_JOBS.STATUS, status)
@@ -124,6 +132,11 @@ class AsyncJobRepository(
 			.set(AsyncJobs.ASYNC_JOBS.UPDATED_AT, now)
 		if (updateResult) {
 			step = step.set(AsyncJobs.ASYNC_JOBS.RESULT, resultJsonb)
+		}
+		if (clearContext) {
+			step = step.set(AsyncJobs.ASYNC_JOBS.CONTEXT, null as JSON?)
+		} else if (updateContext && contextJson != null) {
+			step = step.set(AsyncJobs.ASYNC_JOBS.CONTEXT, contextJson)
 		}
 		step.where(AsyncJobs.ASYNC_JOBS.UUID.eq(uuid)).execute()
 	}

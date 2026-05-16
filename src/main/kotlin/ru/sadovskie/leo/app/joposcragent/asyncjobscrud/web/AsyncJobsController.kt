@@ -64,14 +64,22 @@ class AsyncJobsController(
 	fun finish(
 		@PathVariable jobUuid: UUID,
 		@PathVariable terminalStatus: String,
+		@RequestBody(required = false) rawBody: String?,
 	): ResponseEntity<Void> {
 		if (log.isDebugEnabled) {
-			log.debug("POST /async-jobs/{}/finish/{}", jobUuid, terminalStatus)
+			log.debug("POST /async-jobs/{}/finish/{} body={}", jobUuid, terminalStatus, rawBody)
 		}
 		val ts = runCatching { AsyncJobTerminalStatus.valueOf(terminalStatus) }.getOrElse {
 			throw BadRequestException("invalid terminalStatus")
 		}
-		service.finish(jobUuid, ts)
+		val bodyNode = if (rawBody.isNullOrBlank()) {
+			null
+		} else {
+			runCatching { jsonMapper.readTree(rawBody) }.getOrElse {
+				throw BadRequestException("invalid JSON body")
+			}
+		}
+		service.finish(jobUuid, ts, bodyNode)
 		if (log.isDebugEnabled) {
 			log.debug("POST /async-jobs/{}/finish/{} -> 200 OK", jobUuid, terminalStatus)
 		}

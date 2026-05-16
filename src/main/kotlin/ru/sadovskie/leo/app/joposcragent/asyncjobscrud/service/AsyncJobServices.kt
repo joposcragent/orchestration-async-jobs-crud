@@ -2,6 +2,8 @@ package ru.sadovskie.leo.app.joposcragent.asyncjobscrud.service
 
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.json.JsonMapper
+import org.jooq.JSON
+import org.jooq.JSONB
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -237,18 +239,77 @@ class AsyncJobRestService(
 	}
 
 	@Transactional
-	fun finish(jobUuid: UUID, terminal: AsyncJobTerminalStatus) {
+	fun finish(jobUuid: UUID, terminal: AsyncJobTerminalStatus, body: JsonNode?) {
 		if (log.isDebugEnabled) {
-			log.debug("REST finish jobUuid={} terminal={}", jobUuid, terminal)
+			log.debug("REST finish jobUuid={} terminal={} body={}", jobUuid, terminal, body?.let { jsonMapper.writeValueAsString(it) })
 		}
+		val finishExtras = parseFinishOptionalBody(body)
 		val row = repository.findByUuid(jobUuid) ?: throw NotFoundException()
 		if (row.status != JooqStatus.STARTED) {
 			throw ConflictException()
 		}
 		val st = JooqStatus.valueOf(terminal.value)
-		repository.finishJob(jobUuid, st, null, updateResult = false)
+		repository.finishJob(
+			uuid = jobUuid,
+			status = st,
+			resultJsonb = finishExtras.resultJsonb,
+			updateResult = finishExtras.updateResult,
+			contextJson = finishExtras.contextJson,
+			clearContext = finishExtras.clearContext,
+			updateContext = finishExtras.updateContext,
+		)
 		log.info("REST finish: job jobUuid={} terminal={}", jobUuid, terminal)
 		maybeCompleteParent(row.parentUuid, jobUuid)
+	}
+
+	private data class FinishExtras(
+		val resultJsonb: JSONB? = null,
+		val updateResult: Boolean = false,
+		val contextJson: JSON? = null,
+		val clearContext: Boolean = false,
+		val updateContext: Boolean = false,
+	)
+
+	private fun parseFinishOptionalBody(body: JsonNode?): FinishExtras {
+		if (body == null || body.isNull || body.isMissingNode) {
+			return FinishExtras()
+		}
+		if (!body.isObject) {
+			throw BadRequestException("finish body must be a JSON object")
+		}
+		body.properties().forEach { (name, _) ->
+			if (name != "context" && name != "result") {
+				throw BadRequestException("unknown field: $name")
+			}
+		}
+		var updateResult = false
+		var resultJsonb: JSONB? = null
+		var updateContext = false
+		var clearContext = false
+		var contextJson: JSON? = null
+		if (body.has("result")) {
+			updateResult = true
+			resultJsonb = repository.resultJsonbFromNode(body.get("result"))
+		}
+		if (body.has("context")) {
+			updateContext = true
+			val ctx = body.get("context")
+			if (ctx.isNull) {
+				clearContext = true
+			} else {
+				if (!ctx.isObject) {
+					throw BadRequestException("context must be object or null")
+				}
+				contextJson = repository.contextJsonFromNode(ctx)
+			}
+		}
+		return FinishExtras(
+			resultJsonb = resultJsonb,
+			updateResult = updateResult,
+			contextJson = contextJson,
+			clearContext = clearContext,
+			updateContext = updateContext,
+		)
 	}
 
 	private fun maybeCompleteParent(parentUuid: UUID?, finishedChildUuid: UUID) {
